@@ -11,10 +11,18 @@
             ExchangeSpecification
             ExchangeSpecification$ResilienceSpecification]
            [org.knowm.xchange.binance BinanceExchange]
-           [org.knowm.xchange.currency Currency]
+           [org.knowm.xchange.binance.service BinanceTradeHistoryParams]
+           [org.knowm.xchange.currency
+            Currency
+            CurrencyPair]
            [org.knowm.xchange.dto.account
             Balance
-            Wallet]))
+            Wallet]
+           [org.knowm.xchange.dto.trade
+            UserTrades
+            UserTrade]
+           [org.knowm.xchange.dto
+            Order$OrderType]))
 
 ;;;; DATAFY
 ;;
@@ -31,6 +39,10 @@
   (datafy [this]
     {:code (-> this (.getCurrencyCode) (.toLowerCase) (keyword))
      :name (.getDisplayName this)})
+
+  CurrencyPair
+  (datafy [this]
+    [(datafy (.base this)) (datafy (.counter this))])
 
   Balance
   (datafy [this]
@@ -50,6 +62,31 @@
                             (filter #(> (:total %) 0)))}
       (.getId this)   (merge :id (.getId this))
       (.getName this) (merge :name (.getName this))))
+
+  Order$OrderType
+  (datafy [this]
+    (-> this (.name) (.toLowerCase) (keyword)))
+
+  UserTrade
+  (datafy [this]
+    {:id              (.getId this)
+     :order-id        (.getOrderId this)
+     :fee-amount      (.getFeeAmount this)
+     :fee-currency    (-> this (.getFeeCurrency) (datafy))
+     :order-user-ref  (.getOrderUserReference this)
+     :type            (-> this (.getType) (datafy))
+     :original-amount (.getOriginalAmount this)
+     :instrument      (-> this (.getInstrument) (datafy))
+     :price           (.getPrice this)
+     :timestamp       (.getTimestamp this)
+     :maker-order-id  (.getMakerOrderId this)
+     :taker-order-id  (.getTakerOrderId this)})
+
+  UserTrades
+  (datafy [this]
+    {:last-id          (.getlastID this) ; Yes, it's not formatted properly as camelCase.
+     :next-page-cursor (.getNextPageCursor this)
+     :trades           (->> this (.getTrades) (map datafy))})
 
   ExchangeSpecification$ResilienceSpecification
   (datafy [this]
@@ -97,24 +134,70 @@
   [exchange-class-or-spec]
   (.createExchange ExchangeFactory/INSTANCE exchange-class-or-spec))
 
-;;;; UTIL
+;;;; EXCHANGE
 
-(defn parse-date
-  "Parse a date dd/MM/yyyy string to java.util.Date."
-  [date-str]
-  (.parse (new java.text.SimpleDateFormat "dd/MM/yyyy") date-str))
+;; TODO: Rename to Exchange. Not a big fan of I prefix for interfaces.
+;; See also https://stackoverflow.com/a/2814831/11095437
+(defprotocol IExchange
+  (fetch-wallets!                 [client]           "Fetch the wallets associated with the client instance credentials.")
+  (fetch-listed-pairs!            [client]           "Fetch all listed currency pairs in the exchange.")
+  (fetch-trading-history-by-pair! [client pair opts] "Fetch the trading history associated with the client instance credentials of a given pair."))
 
-(defprotocol Timestamp
-  (timestamp [date]))
+(defn currency->str
+  [currency]
+  (-> currency :code name (.toUpperCase)))
 
-(extend-protocol Timestamp
-  java.util.Date
-  (timestamp [date]
-    (.getTime date))
+(defn pair->str
+  [[base quote]]
+  (str (currency->str base) "-" (currency->str quote)))
 
-  String
-  (timestamp [date]
-    (.getTime (parse-date date))))
+(defn ->CurrencyPair ^CurrencyPair
+  [pair]
+  (new CurrencyPair (pair->str pair)))
+
+(defn contain-currency?
+  [[base quote] currency]
+  (or (= base currency)
+      (= quote currency)))
+
+(defn listed-pairs-for-wallet
+  [wallet listed-pairs]
+  (->> wallet
+       :balances
+       (mapcat (fn [{:keys [currency]}]
+                 (filter #(contain-currency? % currency) listed-pairs)))
+       (distinct)))
+
+;;; BINANCE
+
+(defn ->BinanceTradeHistoryParams ^BinanceTradeHistoryParams
+  ([pair]
+   (->BinanceTradeHistoryParams pair 0))
+  ([pair start-id]
+   (doto (new BinanceTradeHistoryParams)
+     (.setCurrencyPair (->CurrencyPair pair))
+     (.setStartId (str start-id)))))
+
+(extend-protocol IExchange
+  BinanceExchange
+  (fetch-wallets! [client]
+    (->> client
+         (.getAccountService)
+         (.getAccountInfo)
+         (.getWallets)
+         (vals)
+         (map datafy)))
+
+  (fetch-listed-pairs! [client]
+    (->> client
+         (.getExchangeSymbols)
+         (map datafy)))
+
+  (fetch-trading-history-by-pair! [client pair opts]
+    (-> client
+        (.getTradeService)
+        (.getTradeHistory (->BinanceTradeHistoryParams pair (get opts :start-id 0)))
+        (datafy))))
 
 ;;;; RCF
 
@@ -124,7 +207,8 @@
 
   ;; Make an exchange is taking a few milliseconds. It's probably because the
   ;; option `shouldLoadRemoveMetaData` in the ExchangeSpecification is set to
-  ;; true by default.
+  ;; true by default. It will do a request to fetch exchange metadata like
+  ;; available currency pairs, trading rules, etc...
   ;;
   ;; See https://github.com/knowm/XChange/blob/develop/xchange-core/src/main/java/org/knowm/xchange/ExchangeSpecification.java#L35
   (def binance
@@ -204,6 +288,71 @@
   ;; References:
   ;; - https://dev.binance.vision/t/viable-way-to-get-trade-history-via-rest-api/1289/5
   ;; - https://dev.binance.vision/t/fetch-all-account-orders/279/9
+  ;;
 
+  (def trade-service
+    (-> binance
+        (.getTradeService)))
 
+  (def trading-history-params
+    (doto (new BinanceTradeHistoryParams)
+      (.setCurrencyPair CurrencyPair/ETH_EUR)
+      (.setStartId "0")))
+
+  (def trades
+    (.getTradeHistory trade-service trading-history-params))
+
+;;; BINANCE
+
+  ;; FETCH TRADING HISTORY OF A PAIR
+  ;;
+  ;; 1. Pair
+  ;; 2. Binance listed pairs
+
+  (def eur {:code :eur, :name "Euro"})
+  (def eth {:code :eth, :name "Ether"})
+
+  (def binance-pairs (fetch-listed-pairs! binance))
+
+  (def eth-pairs
+    (->> binance-pairs
+         (filter (fn [[base quote]]
+                   (or (= base eth)
+                       (= quote eth))))))
+
+  (count eth-pairs) ;; => 103
+
+  (defn fetch-trading-history-by-pairs!
+    [binance pairs]
+    (doall (->> pairs
+                (take 2)
+                (map #(fetch-trading-history-by-pair! binance % {:start-id 0})))))
+
+  ;; It work but takes a life time to fetch.
+  (def eth-trading-history
+    (fetch-trading-history-by-pairs! binance eth-pairs))
+
+  (count eth-trading-history) ;; => 103
+
+  ;; How long does it take to fetch the trading history of all pairs that contain ETH?
+  ;; => It takes an average of 29seconds
+  (time (fetch-trading-history-by-pairs! binance eth-pairs))
+
+  ;; Fetch the trading history of my wallet
+
+  (count (listed-pairs-for-wallet (datafy wallet) binance-pairs)) ;; => 894
+
+  (defn fetch-wallet-trading-history!
+    [binance wallet listed-pairs]
+    (doall (->> listed-pairs
+                (listed-pairs-for-wallet-balances wallet)
+                (fetch-trading-history-by-pairs! binance))))
+
+  ;; Of couse it threw an error
+  ;;
+  ;; Too much request weight used; current limit is 1200 request weight per 1
+  ;; MINUTE. Please use the websocket for live updates to avoid polling the
+  ;; API. (HTTP status code: 429)
+  (def wallet-trading-history
+    (time (fetch-wallet-trading-history! binance (datafy wallet) binance-pairs)))
   ,)
