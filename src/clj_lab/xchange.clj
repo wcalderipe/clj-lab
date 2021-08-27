@@ -193,6 +193,13 @@
          (.getExchangeSymbols)
          (map datafy)))
 
+  ;; The function seems to lack the ability to fetch trading history
+  ;; pagination. Accordingly to Binance's documentation, the endpoint to fetch
+  ;; the history only returns 1000 items per result. What determines the
+  ;; pagination cursor is the trade ID passed as `start-id`. Therefore, if a
+  ;; response has more than 1000 items, the function (or another) needs to get
+  ;; the last trade's ID and do it again on the same pair but this time with a
+  ;; different `start-id` than zero.
   (fetch-trading-history-by-pair! [client pair opts]
     (-> client
         (.getTradeService)
@@ -356,3 +363,71 @@
   (def wallet-trading-history
     (time (fetch-wallet-trading-history! binance (datafy wallet) binance-pairs)))
   ,)
+
+;;; THROTTLING
+(comment
+  (def wallet (-> binance
+                  (fetch-wallets!)
+                  (first)))
+
+  (def pairs (->> binance
+                  (fetch-listed-pairs!)
+                  (listed-pairs-for-wallet wallet)))
+
+  (def responses (atom []))
+
+  ;;; BLOCKING
+
+  (defn throttle
+    [pairs f]
+    (doseq [pair pairs]
+      (f pair)
+      (Thread/sleep 1000)))
+
+  (defn throttle*
+    [pairs batch-size f]
+    (when (not (empty? pairs))
+      (doseq [pair (take batch-size pairs)]
+        (f pair))
+      (Thread/sleep 61000) ;; Takes 1 minute to Binance's IP rate limit to refresh.
+      (recur (nthrest pairs batch-size) batch-size f)))
+
+  (defn progress-str
+    [responses pairs]
+    (str (count responses) "/" (count pairs)))
+
+  (defn throttle-handler
+    [pair]
+    (println "Fetching trading history of" (pair->str pair) (progress-str @responses pairs))
+    (let [res (fetch-trading-history-by-pair! binance pair {:start-id 0})]
+      (swap! responses conj res)))
+
+  (time (throttle pairs throttle-handler))
+  ;; => "Elapsed time: 1202227.871292 msecs"
+
+  ;; In Binance, IPs have a hard limit of 1200 credits (request weight on
+  ;; Binance's terminology). Each request to the /myTrades endpoint costs 10
+  ;; credits. In theory, the batch size must be less or equals than 1200 / 10.
+  (time (throttle* pairs 100 throttle-handler))
+  ;; => "Elapsed time: 856390.361417 msecs"
+
+  (spit "responses.edn" @responses)
+
+  (def responses (-> (slurp "responses.edn")
+                     (read-string)
+                     (atom)))
+
+  (first @responses)
+
+  (def trades (->> @responses
+                   (mapcat :trades)))
+
+  (keys (first trades))
+
+  (->> trades
+       (group-by :order-id)
+       (filter (fn [[_order-id trades]]
+                 (> (count trades) 1))))
+
+
+  )
