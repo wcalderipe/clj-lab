@@ -10,27 +10,43 @@
 
 (defn fetch-trade-history!
   [idx]
-  ;; Simulate network latency.
   (go
-    (<! (timeout 1000))
+    ;; Simulate network latency.
+    (<! (timeout 250))
     {:idx idx}))
 
 (def idx-channel (chan))
 (def trading-history-channel (chan))
+(def terminate-channel (chan))
 
 ;; Publish
-(def idx-channel-loop
+(defn publisher []
   (go-loop []
-    (<! (timeout 1000))
-    (>! idx-channel (UUID/randomUUID))
-    (recur)))
+    (let [[terminate] (async/alts! [terminate-channel] :default :continue)] ;; Kill switch
+      (when (= terminate :continue)
+        (>! idx-channel (UUID/randomUUID))
+        #_(<! (timeout 500))
+        (recur)))))
 
 ;; Ingestion
-(def trading-history-ingestion
+(defn ingestion []
   (go-loop []
-    (let [idx (<! idx-channel)]
-      (println "Fetching trade history" idx)
-      (>! trading-history-channel (<! (fetch-trade-history! idx)))
-      (recur))))
+    (dotimes [x 5]
+      (let [idx (<! idx-channel)]
+        (println "Fetching trade history" idx x)
+        (>! trading-history-channel (<! (fetch-trade-history! idx)))))
+    (<! (timeout 5000))
+    (recur)))
 
-;; Kill switch
+(defn start []
+  (go (while true
+        (<! trading-history-channel))))
+
+(comment
+  (publisher)
+  (ingestion)
+  (start)
+
+  (>!! terminate-channel :drop-the-mic)
+
+  )
