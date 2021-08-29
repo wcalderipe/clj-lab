@@ -3,8 +3,11 @@
          org.clojure/core.async {:mvn/version "1.3.618"}
 
          ;; Playing with https://github.com/knowm/XChange (see xchange.clj)
-         org.knowm.xchange/xchange-core {:mvn/version "5.0.8"}
-         org.knowm.xchange/xchange-binance {:mvn/version "5.0.8"}}
+         org.knowm.xchange/xchange-core    {:mvn/version "5.0.8"}
+         org.knowm.xchange/xchange-binance {:mvn/version "5.0.8"}
+
+         ;; Playing with https://github.com/leonoel/missionary (see missionary.clj)
+         missionary/missionary {:mvn/version "b.21"}}
  :aliases
  {:run-m   {:main-opts ["-m" "clj-lab.core"]}
   :run-x   {:ns-default clj-lab.core
