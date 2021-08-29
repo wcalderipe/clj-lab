@@ -1,5 +1,6 @@
 {:paths ["src" "resources"]
- :deps  {org.clojure/clojure {:mvn/version "1.10.3"}
+ :deps  {org.clojure/clojure    {:mvn/version "1.10.3"}
+         org.clojure/core.async {:mvn/version "1.3.618"}
 
          ;; Playing with https://github.com/knowm/XChange (see xchange.clj)
          org.knowm.xchange/xchange-core {:mvn/version "5.0.8"}
