@@ -8,45 +8,92 @@
   (:require [clojure.core.async :as async :refer [<! >! <!! >!! chan go go-loop timeout alts!]])
   (:import [java.util UUID]))
 
+(defmacro with-kill-switch
+  {:style/indent 1}
+  [terminate-chan & body]
+  `(let [[terminate#] (async/alts! [~terminate-chan] :default :continue)]
+     (when (= terminate# :continue)
+       ~@body)))
+
 (defn fetch-trade-history!
   [idx]
-  (go
-    ;; Simulate network latency.
-    (<! (timeout 250))
+  (async/go
+    (async/<! (async/timeout 3000)) ;; Simulate network latency.
+    (println "Fetched" idx)
     {:idx idx}))
 
-(def idx-channel (chan))
-(def trading-history-channel (chan))
-(def terminate-channel (chan))
+;;;; Publisher
 
-;; Publish
-(defn publisher []
-  (go-loop []
-    (let [[terminate] (async/alts! [terminate-channel] :default :continue)] ;; Kill switch
-      (when (= terminate :continue)
-        (>! idx-channel (UUID/randomUUID))
-        #_(<! (timeout 500))
-        (recur)))))
+(defn publisher
+  [{:keys [idx-chan kill-switch-chan]}]
+  (async/go-loop []
+    (with-kill-switch kill-switch-chan
+      (async/>! idx-chan (UUID/randomUUID))
+      (async/<! (async/timeout 250))
+      (recur))))
 
-;; Ingestion
-(defn ingestion []
+;;;; Consumer
+
+;;; Single request
+
+(defn process
+  [{:keys [in out wait-ms]}]
   (go-loop []
-    (dotimes [x 5]
-      (let [idx (<! idx-channel)]
-        (println "Fetching trade history" idx x)
-        (>! trading-history-channel (<! (fetch-trade-history! idx)))))
-    (<! (timeout 5000))
+    (let [idx (<! in)]
+      (println "Processing" idx)
+      (>! out (<! (fetch-trade-history! idx))))
+    (<! (timeout wait-ms))
     (recur)))
 
-(defn start []
-  (go (while true
-        (<! trading-history-channel))))
+(defn start
+  [{:keys [idx-chan trading-history-chan]}]
+  (process {:in      idx-chan
+            :out     trading-history-chan
+            :wait-ms 1000}))
+
+;;; Batch requests
+
+(defn process-in-batch
+  [{:keys [in out batch-size wait-ms]} f]
+  (async/go-loop []
+    (async/pipeline-async
+     batch-size
+     out
+     (fn [input ch]
+       (async/go
+         (async/>! ch (async/<! (f input)))))
+     in)
+    (async/<! (async/timeout wait-ms))
+    (recur)))
+
+(defn start-batch-consumer
+  [{:keys [idx-chan trading-history-chan]}]
+  (process-in-batch
+   {:in         idx-chan
+    :out        trading-history-chan
+    :batch-size 5
+    :wait-ms    5000}
+   fetch-trade-history!))
 
 (comment
-  (publisher)
-  (ingestion)
-  (start)
+  (def idx-chan (async/chan))
+  (def trading-history-chan (async/chan))
+  (def kill-switch-chan (async/chan))
 
-  (>!! terminate-channel :drop-the-mic)
+  (publisher {:idx-chan         idx-chan
+              :kill-switch-chan kill-switch-chan})
 
+
+  (start {:idx-chan             idx-chan
+          :trading-history-chan trading-history-chan})
+
+  (start-batch-consumer {:idx-chan             idx-chan
+                         :trading-history-chan trading-history-chan})
+
+  (async/close! kill-switch-chan)
+
+  (<!! idx-chan)
+
+  ;; For the single request process, taking from the output channel will release the parked thread.
+  (<!! trading-history-chan)
   )
