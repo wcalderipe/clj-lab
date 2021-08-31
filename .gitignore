@@ -1,8 +1,7 @@
-/target
-/classes
-/checkouts
-*.jar
 *.class
+*.jar
+.hg/
+.hgignore
 /.calva/output-window/
 /.cpcache
 /.lein-*
@@ -11,5 +10,7 @@
 /.nrepl-port
 /.rebel_readline_history
 /.socket-repl-port
-.hgignore
-.hg/
+/checkouts
+/classes
+/resources/gcloud-service-account-key.json
+/target
